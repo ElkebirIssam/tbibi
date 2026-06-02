@@ -22,6 +22,8 @@ import ProfilePage from './pages/ProfilePage';
 import SpecializationsPage from './pages/SpecializationsPage';
 import DossierPage from './pages/DossierPage';
 import NotificationsPage from './pages/NotificationsPage';
+import AvailabilityPage from './pages/AvailabilityPage';
+import HonorairesPage from './pages/HonorairesPage';
 
 function PrivateRoute({ children, roles }) {
   const { user, loading } = useAuth();
@@ -58,6 +60,8 @@ function App() {
         <Route path="profile" element={<ProfilePage />} />
         <Route path="dossier" element={<PrivateRoute roles={['patient']}><DossierPage /></PrivateRoute>} />
         <Route path="notifications" element={<NotificationsPage />} />
+        <Route path="availability" element={<PrivateRoute roles={['doctor']}><AvailabilityPage /></PrivateRoute>} />
+        <Route path="honoraires" element={<PrivateRoute roles={['doctor', 'assistant', 'nurse']}><HonorairesPage /></PrivateRoute>} />
       </Route>
     </Routes>
   );

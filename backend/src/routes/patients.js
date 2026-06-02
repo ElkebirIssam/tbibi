@@ -9,5 +9,7 @@ router.get('/search', authorize('assistant', 'nurse', 'doctor', 'super_admin'), 
 router.get('/doctors', patientController.getDoctors);
 router.get('/my-profile', authorize('patient'), patientController.getMyProfile);
 router.get('/:id', authorize('assistant', 'nurse', 'doctor', 'super_admin', 'patient'), patientController.getById);
+router.put('/:id', authorize('assistant', 'nurse', 'doctor', 'super_admin'), patientController.update);
+router.get('/assurances/list', patientController.getAssurances);
 
 module.exports = router;

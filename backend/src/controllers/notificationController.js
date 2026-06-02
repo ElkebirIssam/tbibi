@@ -43,6 +43,17 @@ const notificationController = {
       res.status(500).json({ error: 'Server error.' });
     }
   },
+
+  async remove(req, res) {
+    try {
+      const notification = await Notification.delete(req.params.id);
+      if (!notification) return res.status(404).json({ error: 'Notification not found.' });
+      res.json({ message: 'Notification deleted.' });
+    } catch (error) {
+      console.error('Delete notification error:', error);
+      res.status(500).json({ error: 'Server error.' });
+    }
+  },
 };
 
 module.exports = notificationController;

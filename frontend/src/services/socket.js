@@ -3,7 +3,10 @@ import { io } from 'socket.io-client';
 let socket = null;
 
 export function connectSocket(token) {
-  socket = io('/', {
+  if (socket?.connected) return socket;
+  if (socket) { socket.disconnect(); socket = null; }
+  const API = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+  socket = io(API, {
     auth: { token },
     transports: ['websocket', 'polling'],
   });

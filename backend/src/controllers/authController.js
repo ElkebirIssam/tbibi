@@ -150,6 +150,9 @@ const authController = {
           firstName: user.first_name,
           lastName: user.last_name,
           phone: user.phone,
+          address: user.address,
+          isVerified: user.is_verified,
+          phoneVerified: user.phone_verified,
           profile,
         },
       });
@@ -233,6 +236,8 @@ const authController = {
         phone: user.phone,
         address: user.address,
         isActive: user.is_active,
+        isVerified: user.is_verified,
+        phoneVerified: user.phone_verified,
         profile,
       });
     } catch (error) {
@@ -243,29 +248,54 @@ const authController = {
 
   async updateProfile(req, res) {
     try {
-      const allowedFields = ['phone', 'address'];
-      const updates = {};
-      for (const field of allowedFields) {
+      const allowedUserFields = ['phone', 'address'];
+      const userUpdates = {};
+      for (const field of allowedUserFields) {
         if (req.body[field] !== undefined) {
-          updates[field] = req.body[field];
+          userUpdates[field] = req.body[field];
         }
       }
 
-      if (Object.keys(updates).length === 0) {
-        return res.status(400).json({ error: 'No valid fields to update.' });
+      if (Object.keys(userUpdates).length > 0) {
+        await User.update(req.user.id, userUpdates);
       }
 
-      const user = await User.update(req.user.id, updates);
+      if (req.user.role === 'patient') {
+        const patientFields = ['date_of_birth', 'birth_place', 'city', 'gender', 'blood_group', 'allergies', 'chronic_diseases', 'emergency_contact_name', 'emergency_contact_phone', 'insurance_provider', 'insurance_number'];
+        const patientUpdates = {};
+        for (const field of patientFields) {
+          if (req.body[field] !== undefined) {
+            patientUpdates[field] = req.body[field];
+          }
+        }
+        if (Object.keys(patientUpdates).length > 0) {
+          const db = require('../config/db');
+          const patient = await Patient.findByUserId(req.user.id);
+          if (patient) {
+            const keys = Object.keys(patientUpdates);
+            const values = Object.values(patientUpdates);
+            const setClause = keys.map((k, i) => `${k} = $${i + 2}`).join(', ');
+            await db.query(
+              `UPDATE patients SET ${setClause} WHERE id = $1`,
+              [patient.id, ...values]
+            );
+          }
+        }
+      }
+
+      const updatedUser = await User.findById(req.user.id);
       res.json({
         message: 'Profile updated.',
         user: {
-          id: user.id,
-          email: user.email,
-          role: user.role,
-          firstName: user.first_name,
-          lastName: user.last_name,
-          phone: user.phone,
-          address: user.address,
+          id: updatedUser.id,
+          email: updatedUser.email,
+          role: updatedUser.role,
+          firstName: updatedUser.first_name,
+          lastName: updatedUser.last_name,
+          phone: updatedUser.phone,
+          address: updatedUser.address,
+          isVerified: updatedUser.is_verified,
+          phoneVerified: updatedUser.phone_verified,
         },
       });
     } catch (error) {
@@ -318,6 +348,95 @@ const authController = {
     } catch (error) {
       console.error('Reset password error:', error);
       res.status(500).json({ error: 'Server error.' });
+    }
+  },
+
+  async sendPhoneCode(req, res) {
+    try {
+      const user = await User.findById(req.user.id);
+      if (!user) return res.status(404).json({ error: 'User not found.' });
+      if (!user.phone) return res.status(400).json({ error: 'Aucun numéro de téléphone enregistré.' });
+
+      const code = Math.floor(100000 + Math.random() * 900000).toString();
+      const expires = new Date(Date.now() + 5 * 60 * 1000);
+
+      await User.update(user.id, {
+        phone_verification_code: code,
+        phone_verification_expires: expires,
+      });
+
+      const whatsapp = require('../utils/whatsapp');
+      const result = await whatsapp.sendVerificationCode(user.phone, code);
+
+      if (result.sent) {
+        res.json({ message: 'Code de vérification envoyé par WhatsApp.' });
+      } else {
+        // Fallback: log to console so user can still test
+        console.log(`[WHATSAPP-FALLBACK] Code pour ${user.phone}: ${code}`);
+        res.json({ message: `Code disponible dans la console (WhatsApp: ${result.reason || 'non disponible'}).` });
+      }
+    } catch (error) {
+      console.error('Send phone code error:', error);
+      res.status(500).json({ error: 'Erreur lors de l\'envoi du code.' });
+    }
+  },
+
+  async verifyPhone(req, res) {
+    try {
+      const { code } = req.body;
+      if (!code) return res.status(400).json({ error: 'Code requis.' });
+
+      const user = await User.findById(req.user.id);
+      if (!user) return res.status(404).json({ error: 'User not found.' });
+
+      if (user.phone_verification_code !== code) {
+        return res.status(400).json({ error: 'Code invalide.' });
+      }
+      if (new Date() > new Date(user.phone_verification_expires)) {
+        return res.status(400).json({ error: 'Code expiré. Veuillez en demander un nouveau.' });
+      }
+
+      await User.update(user.id, {
+        phone_verified: true,
+        phone_verification_code: null,
+        phone_verification_expires: null,
+      });
+
+      res.json({ message: 'Téléphone vérifié avec succès.' });
+    } catch (error) {
+      console.error('Verify phone error:', error);
+      res.status(500).json({ error: 'Erreur lors de la vérification.' });
+    }
+  },
+
+  async sendEmailVerification(req, res) {
+    try {
+      const user = await User.findById(req.user.id);
+      if (!user) return res.status(404).json({ error: 'User not found.' });
+
+      if (user.is_verified) {
+        return res.json({ message: 'Email déjà vérifié.' });
+      }
+
+      const verificationCode = require('../utils/helpers').generateVerificationCode();
+      await User.update(user.id, { verification_code: verificationCode });
+
+      const { sendConfirmationEmail } = require('../utils/email');
+      sendConfirmationEmail({
+        to: user.email,
+        firstName: user.first_name,
+        lastName: user.last_name,
+        verificationCode,
+      }).then(result => {
+        if (result?.previewUrl) console.log(`[EMAIL] Preview: ${result.previewUrl}`);
+      }).catch(err => {
+        console.error('[EMAIL] Background send failed:', err.message);
+      });
+
+      res.json({ message: 'Email de vérification envoyé.' });
+    } catch (error) {
+      console.error('Send email verification error:', error);
+      res.status(500).json({ error: 'Erreur lors de l\'envoi.' });
     }
   },
 

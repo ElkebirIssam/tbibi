@@ -1,16 +1,16 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
-import { io } from 'socket.io-client';
-import { useAuth } from '../context/AuthContext';
+import { getSocket } from '../services/socket';
 
 export default function NotificationBell() {
   const [unread, setUnread] = useState(0);
   const [notifications, setNotifications] = useState([]);
   const [open, setOpen] = useState(false);
   const dropdownRef = useRef();
+  const listenersAttached = useRef(false);
   const navigate = useNavigate();
-  const { token } = useAuth();
+  const token = localStorage.getItem('tbibi_token');
   const API = import.meta.env.VITE_API_URL || 'http://localhost:5000';
 
   useEffect(() => {
@@ -23,13 +23,38 @@ export default function NotificationBell() {
       headers: { Authorization: `Bearer ${token}` },
     }).then(r => setNotifications(r.data.data)).catch(() => {});
 
-    const socket = io(API, { auth: { token } });
-    socket.on('notification_count', (count) => setUnread(count));
-    socket.on('notification', (n) => {
-      setUnread(c => c + 1);
-      setNotifications(prev => [n, ...prev].slice(0, 5));
-    });
-    return () => socket.disconnect();
+    function attach() {
+      const socket = getSocket();
+      if (!socket || listenersAttached.current) return;
+      socket.on('notification_count', (count) => setUnread(count));
+      socket.on('notification', (n) => {
+        setUnread(c => c + 1);
+        setNotifications(prev => [n, ...prev].slice(0, 5));
+      });
+      listenersAttached.current = true;
+    }
+    attach();
+    const retry = setInterval(attach, 2000);
+
+    const handleUpdate = () => {
+      axios.get(`${API}/api/notifications/unread-count`, {
+        headers: { Authorization: `Bearer ${token}` },
+      }).then(r => setUnread(r.data.count)).catch(() => {});
+      axios.get(`${API}/api/notifications?limit=5`, {
+        headers: { Authorization: `Bearer ${token}` },
+      }).then(r => setNotifications(r.data.data)).catch(() => {});
+    };
+    window.addEventListener('notification-update', handleUpdate);
+    return () => {
+      clearInterval(retry);
+      window.removeEventListener('notification-update', handleUpdate);
+      const socket = getSocket();
+      if (socket) {
+        socket.off('notification_count');
+        socket.off('notification');
+      }
+      listenersAttached.current = false;
+    };
   }, [token]);
 
   useEffect(() => {

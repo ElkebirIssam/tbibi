@@ -1,5 +1,8 @@
-const { Pool } = require('pg');
+const { Pool, types } = require('pg');
 require('dotenv').config();
+
+// Return DATE as YYYY-MM-DD string (no UTC offset shift)
+types.setTypeParser(types.builtins.DATE, val => val);
 
 const pool = new Pool({
   host: process.env.DB_HOST,

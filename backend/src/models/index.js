@@ -1,4 +1,5 @@
 const db = require('../config/db');
+const { encrypt, decrypt } = require('../utils/crypto');
 
 const User = {
   async create({ email, passwordHash, role, firstName, lastName, phone, address, isActive }) {
@@ -151,10 +152,11 @@ const Doctor = {
 
   async getAssistants(doctorId) {
     const { rows } = await db.query(
-      `SELECT u.id, u.email, u.first_name, u.last_name, u.phone, u.is_active, u.is_verified
+      `SELECT u.id, u.email, u.role, u.first_name, u.last_name, u.phone, u.is_active, u.is_verified
        FROM users u
-       WHERE u.role IN ('assistant', 'nurse')
-       ORDER BY u.last_name`
+       WHERE u.role IN ('assistant', 'nurse') AND u.doctor_id = $1
+       ORDER BY u.last_name`,
+      [doctorId]
     );
     return rows;
   },
@@ -174,11 +176,18 @@ const Doctor = {
 };
 
 const Patient = {
-  async create({ userId, dateOfBirth, birthPlace, city, gender, bloodGroup, allergies, chronicDiseases, emergencyContactName, emergencyContactPhone, insuranceProvider, insuranceNumber }) {
+  async generateCode() {
+    const { rows } = await db.query("SELECT COALESCE(MAX(SUBSTRING(patient_code FROM 4)::INTEGER), 0) + 1 AS next FROM patients WHERE patient_code ~ '^TB-\\d+$'");
+    const next = parseInt(rows[0].next);
+    return `TB-${String(next).padStart(5, '0')}`;
+  },
+
+  async create({ userId, dateOfBirth, birthPlace, city, gender, bloodGroup, allergies, chronicDiseases, emergencyContactName, emergencyContactPhone, insuranceProvider, insuranceNumber, nationalId }) {
+    const code = await this.generateCode();
     const { rows } = await db.query(
-      `INSERT INTO patients (user_id, date_of_birth, birth_place, city, gender, blood_group, allergies, chronic_diseases, emergency_contact_name, emergency_contact_phone, insurance_provider, insurance_number)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
-      [userId, dateOfBirth, birthPlace, city, gender, bloodGroup, allergies, chronicDiseases, emergencyContactName, emergencyContactPhone, insuranceProvider, insuranceNumber]
+      `INSERT INTO patients (user_id, date_of_birth, birth_place, city, gender, blood_group, allergies, chronic_diseases, emergency_contact_name, emergency_contact_phone, insurance_provider, insurance_number, patient_code, national_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING *`,
+      [userId, dateOfBirth, birthPlace, city, gender, bloodGroup, allergies, chronicDiseases, emergencyContactName, emergencyContactPhone, insuranceProvider, insuranceNumber, code, nationalId]
     );
     return rows[0];
   },
@@ -206,14 +215,14 @@ const Patient = {
     const offset = (page - 1) * limit;
     const countResult = await db.query(
       `SELECT COUNT(*) FROM patients p JOIN users u ON p.user_id = u.id
-       WHERE u.first_name ILIKE $1 OR u.last_name ILIKE $1 OR u.email ILIKE $1 OR u.phone ILIKE $1`,
+       WHERE p.patient_code ILIKE $1 OR u.first_name ILIKE $1 OR u.last_name ILIKE $1 OR u.email ILIKE $1 OR u.phone ILIKE $1 OR p.national_id ILIKE $1`,
       [searchTerm]
     );
     const total = parseInt(countResult.rows[0].count);
     const { rows } = await db.query(
-      `SELECT p.id, u.id as user_id, u.email, u.first_name, u.last_name, u.phone
+      `SELECT p.id, p.patient_code, p.national_id, u.id as user_id, u.email, u.first_name, u.last_name, u.phone
        FROM patients p JOIN users u ON p.user_id = u.id
-       WHERE u.first_name ILIKE $1 OR u.last_name ILIKE $1 OR u.email ILIKE $1 OR u.phone ILIKE $1
+       WHERE p.patient_code ILIKE $1 OR u.first_name ILIKE $1 OR u.last_name ILIKE $1 OR u.email ILIKE $1 OR u.phone ILIKE $1 OR p.national_id ILIKE $1
        ORDER BY u.last_name LIMIT $2 OFFSET $3`,
       [searchTerm, limit, offset]
     );
@@ -232,7 +241,7 @@ const Patient = {
        ORDER BY c.created_at DESC`,
       [patientId]
     );
-    return rows;
+    return rows.map(r => { r.symptoms = decrypt(r.symptoms); r.report = decrypt(r.report); r.diagnosis = decrypt(r.diagnosis); return r; });
   },
 
   async getDocuments(patientId) {
@@ -253,6 +262,28 @@ const Patient = {
       'SELECT * FROM invoices WHERE patient_id = $1 ORDER BY created_at DESC',
       [patientId]
     );
+    for (const inv of rows) {
+      const { rows: items } = await db.query(
+        'SELECT * FROM invoice_items WHERE invoice_id = $1',
+        [inv.id]
+      );
+      inv.items = items;
+    }
+    return rows;
+  },
+
+  async getLabAnalysesForPatient(patientId) {
+    const { rows } = await db.query(
+      `SELECT la.*, c.created_at as consultation_date, d.id as doctor_id,
+              u.first_name as doctor_first_name, u.last_name as doctor_last_name
+       FROM lab_analyses la
+       JOIN consultations c ON la.consultation_id = c.id
+       JOIN doctors d ON c.doctor_id = d.id
+       JOIN users u ON d.user_id = u.id
+       WHERE c.patient_id = $1
+       ORDER BY la.created_at DESC`,
+      [patientId]
+    );
     return rows;
   },
 
@@ -266,25 +297,40 @@ const Patient = {
 };
 
 const Appointment = {
-  async create({ doctorId, patientId, assistantId, title, startTime, endTime, notes }) {
+  async create({ doctorId, patientId, assistantId, title, startTime, endTime, notes, status, bookedFor }) {
     const { rows } = await db.query(
-      `INSERT INTO appointments (doctor_id, patient_id, assistant_id, title, start_time, end_time, notes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [doctorId, patientId, assistantId, title, startTime, endTime, notes]
+      `INSERT INTO appointments (doctor_id, patient_id, assistant_id, title, start_time, end_time, notes, status, booked_for)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+      [doctorId, patientId, assistantId, title, startTime, endTime, notes, status || 'pending', bookedFor || null]
     );
     return rows[0];
   },
 
+  async findByPatientAndDate(patientId, date) {
+    const { rows } = await db.query(
+      `SELECT id, status FROM appointments
+       WHERE patient_id = $1
+         AND DATE(start_time) = $2
+         AND status IN ('pending', 'confirmed')`,
+      [patientId, date]
+    );
+    return rows;
+  },
+
   async findById(id) {
     const { rows } = await db.query(
-      `SELECT a.*,
+      `SELECT a.*, p.patient_code,
               pat_user.first_name as patient_first_name, pat_user.last_name as patient_last_name, pat_user.phone as patient_phone,
-              doc_user.first_name as doctor_first_name, doc_user.last_name as doctor_last_name
+              doc_user.first_name as doctor_first_name, doc_user.last_name as doctor_last_name,
+              CASE WHEN c.id IS NOT NULL THEN true
+                   WHEN EXISTS (SELECT 1 FROM consultations c2 WHERE c2.patient_id = a.patient_id AND c2.doctor_id = a.doctor_id AND c2.created_at::date = a.start_time::date) THEN true
+                   ELSE false END as has_consultation
        FROM appointments a
        JOIN patients p ON a.patient_id = p.id
        JOIN users pat_user ON p.user_id = pat_user.id
        JOIN doctors d ON a.doctor_id = d.id
        JOIN users doc_user ON d.user_id = doc_user.id
+       LEFT JOIN consultations c ON c.appointment_id = a.id
        WHERE a.id = $1`,
       [id]
     );
@@ -292,10 +338,19 @@ const Appointment = {
   },
 
   async findByDoctor(doctorId, startDate, endDate) {
-    let query = 'SELECT a.*, u.first_name as patient_first_name, u.last_name as patient_last_name, u.phone as patient_phone FROM appointments a JOIN patients p ON a.patient_id = p.id JOIN users u ON p.user_id = u.id WHERE a.doctor_id = $1';
+    let query = `SELECT a.*, p.patient_code, u.first_name as patient_first_name, u.last_name as patient_last_name, u.phone as patient_phone,
+                        CASE WHEN c.id IS NOT NULL THEN true
+                             WHEN EXISTS (SELECT 1 FROM consultations c2 WHERE c2.patient_id = a.patient_id AND c2.doctor_id = a.doctor_id AND c2.created_at::date = a.start_time::date) THEN true
+                             ELSE false END as has_consultation
+                 FROM appointments a
+                 JOIN patients p ON a.patient_id = p.id
+                 JOIN users u ON p.user_id = u.id
+                 LEFT JOIN consultations c ON c.appointment_id = a.id
+                 WHERE a.doctor_id = $1`;
     const params = [doctorId];
     if (startDate && endDate) {
-      query += ' AND a.start_time >= $2 AND a.end_time <= $3';
+      // Include all appointments starting within the date range
+      query += ' AND a.start_time >= $2::date AND a.start_time < $3::date + interval \'1 day\'';
       params.push(startDate, endDate);
     }
     query += ' ORDER BY a.start_time';
@@ -304,13 +359,24 @@ const Appointment = {
   },
 
   async findByPatient(patientId, startDate, endDate) {
-    let query = 'SELECT a.*, doc_user.first_name as doctor_first_name, doc_user.last_name as doctor_last_name FROM appointments a JOIN doctors d ON a.doctor_id = d.id JOIN users doc_user ON d.user_id = doc_user.id WHERE a.patient_id = $1';
+    let query = `SELECT a.*, p.patient_code, doc_user.first_name as doctor_first_name, doc_user.last_name as doctor_last_name,
+                        COALESCE(s.name, d.specialization) as specialization,
+                        CASE WHEN c.id IS NOT NULL THEN true
+                             WHEN EXISTS (SELECT 1 FROM consultations c2 WHERE c2.patient_id = a.patient_id AND c2.doctor_id = a.doctor_id AND c2.created_at::date = a.start_time::date) THEN true
+                             ELSE false END as has_consultation
+                 FROM appointments a
+                 JOIN doctors d ON a.doctor_id = d.id
+                 JOIN users doc_user ON d.user_id = doc_user.id
+                 JOIN patients p ON a.patient_id = p.id
+                 LEFT JOIN specializations s ON d.specialization_id = s.id
+                 LEFT JOIN consultations c ON c.appointment_id = a.id
+                 WHERE a.patient_id = $1`;
     const params = [patientId];
     if (startDate && endDate) {
-      query += ' AND a.start_time >= $2 AND a.end_time <= $3';
+      query += ' AND a.start_time >= $2::date AND a.start_time < $3::date + interval \'1 day\'';
       params.push(startDate, endDate);
     }
-    query += ' ORDER BY a.start_time';
+    query += ' ORDER BY a.start_time DESC';
     const { rows } = await db.query(query, params);
     return rows;
   },
@@ -332,13 +398,67 @@ const Appointment = {
 };
 
 const Consultation = {
-  async create({ appointmentId, patientId, doctorId, symptoms, report, diagnosis, prescribedRest }) {
+  async create({ appointmentId, patientId, doctorId, feeItemId, feeName, symptoms, report, diagnosis, prescribedRest }) {
     const { rows } = await db.query(
-      `INSERT INTO consultations (appointment_id, patient_id, doctor_id, symptoms, report, diagnosis, prescribed_rest)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [appointmentId, patientId, doctorId, symptoms, report, diagnosis, prescribedRest]
+      `INSERT INTO consultations (appointment_id, patient_id, doctor_id, fee_item_id, fee_name, symptoms, report, diagnosis, prescribed_rest)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+      [appointmentId, patientId, doctorId, feeItemId, feeName, encrypt(symptoms), encrypt(report), encrypt(diagnosis), prescribedRest]
     );
-    return rows[0];
+    const r = rows[0];
+    if (r) { r.symptoms = decrypt(r.symptoms); r.report = decrypt(r.report); r.diagnosis = decrypt(r.diagnosis); }
+    return r;
+  },
+
+  async findById(id) {
+    const { rows } = await db.query(
+      `SELECT c.*, u.first_name, u.last_name FROM consultations c
+       JOIN doctors d ON c.doctor_id = d.id
+       JOIN users u ON d.user_id = u.id
+       WHERE c.id = $1`,
+      [id]
+    );
+    const r = rows[0];
+    if (r) { r.symptoms = decrypt(r.symptoms); r.report = decrypt(r.report); r.diagnosis = decrypt(r.diagnosis); }
+    return r;
+  },
+
+  async addPrescription(consultationId, { medicationName, dosage, frequency, duration, notes }) {
+    const { rows } = await db.query(
+      `INSERT INTO prescriptions (consultation_id, medication_name, dosage, frequency, duration, notes)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [consultationId, encrypt(medicationName), dosage, frequency, duration, encrypt(notes)]
+    );
+    const r = rows[0];
+    if (r) { r.medication_name = decrypt(r.medication_name); r.notes = decrypt(r.notes); }
+    return r;
+  },
+
+  async getPrescriptions(consultationId) {
+    const { rows } = await db.query('SELECT * FROM prescriptions WHERE consultation_id = $1', [consultationId]);
+    return rows.map(r => { r.medication_name = decrypt(r.medication_name); r.notes = decrypt(r.notes); return r; });
+  },
+
+  async findByDoctor(doctorId, { page = 1, limit = 50 } = {}) {
+    const offset = (page - 1) * limit;
+    const countResult = await db.query(
+      `SELECT COUNT(*) FROM consultations WHERE doctor_id = $1`, [doctorId]
+    );
+    const total = parseInt(countResult.rows[0].count);
+    const { rows } = await db.query(
+      `SELECT c.*, u.first_name, u.last_name, u.email, p.patient_code, f.name as fee_item_name
+       FROM consultations c
+       JOIN patients p ON c.patient_id = p.id
+       JOIN users u ON p.user_id = u.id
+       LEFT JOIN fee_items f ON c.fee_item_id = f.id
+       WHERE c.doctor_id = $1
+       ORDER BY c.created_at DESC
+       LIMIT $2 OFFSET $3`,
+      [doctorId, limit, offset]
+    );
+    return {
+      data: rows.map(r => { r.symptoms = decrypt(r.symptoms); r.report = decrypt(r.report); r.diagnosis = decrypt(r.diagnosis); return r; }),
+      total, page, limit
+    };
   },
 
   async findById(id) {
@@ -378,6 +498,108 @@ const Consultation = {
   async getLabAnalyses(consultationId) {
     const { rows } = await db.query('SELECT * FROM lab_analyses WHERE consultation_id = $1', [consultationId]);
     return rows;
+  },
+
+  async findByDoctor(doctorId, { page = 1, limit = 50 } = {}) {
+    const offset = (page - 1) * limit;
+    const countResult = await db.query(
+      `SELECT COUNT(*) FROM consultations WHERE doctor_id = $1`, [doctorId]
+    );
+    const total = parseInt(countResult.rows[0].count);
+    const { rows } = await db.query(
+      `SELECT c.*, u.first_name, u.last_name, u.email, p.patient_code, f.name as fee_item_name
+       FROM consultations c
+       JOIN patients p ON c.patient_id = p.id
+       JOIN users u ON p.user_id = u.id
+       LEFT JOIN fee_items f ON c.fee_item_id = f.id
+       WHERE c.doctor_id = $1
+       ORDER BY c.created_at DESC
+       LIMIT $2 OFFSET $3`,
+      [doctorId, limit, offset]
+    );
+    return { data: rows, total, page, limit };
+  },
+
+  async requestAccess(consultationId, requestingDoctorId) {
+    const { rows } = await db.query(
+      `INSERT INTO consultation_access_requests (consultation_id, requesting_doctor_id)
+       VALUES ($1, $2) RETURNING *`,
+      [consultationId, requestingDoctorId]
+    );
+    return rows[0];
+  },
+
+  async getAccessRequests(doctorId) {
+    const { rows } = await db.query(
+      `SELECT r.*, u.first_name as doctor_first_name, u.last_name as doctor_last_name,
+              c.patient_id, c.created_at as consultation_date
+       FROM consultation_access_requests r
+       JOIN consultations c ON r.consultation_id = c.id
+       JOIN doctors d ON r.requesting_doctor_id = d.id
+       JOIN users u ON d.user_id = u.id
+       WHERE c.doctor_id = $1
+       ORDER BY r.created_at DESC`,
+      [doctorId]
+    );
+    return rows;
+  },
+
+  async getAccessStatus(consultationId, requestingDoctorId) {
+    const { rows } = await db.query(
+      `SELECT status, patient_status FROM consultation_access_requests
+       WHERE consultation_id = $1 AND requesting_doctor_id = $2
+       ORDER BY created_at DESC LIMIT 1`,
+      [consultationId, requestingDoctorId]
+    );
+    return rows[0] || { status: null, patient_status: null };
+  },
+
+  async respondToAccessRequest(requestId, status) {
+    const { rows } = await db.query(
+      `UPDATE consultation_access_requests SET status = $1, updated_at = NOW()
+       WHERE id = $2 RETURNING *`,
+      [status, requestId]
+    );
+    return rows[0];
+  },
+
+  async updateAccessStatus(requestId, doctorStatus, patientStatus) {
+    const { rows } = await db.query(
+      `UPDATE consultation_access_requests SET status = $1, patient_status = $2, updated_at = NOW()
+       WHERE id = $3 RETURNING *`,
+      [doctorStatus, patientStatus, requestId]
+    );
+    return rows[0];
+  },
+
+  async patientRespondToAccessRequest(requestId, patientStatus) {
+    const { rows } = await db.query(
+      `UPDATE consultation_access_requests SET patient_status = $1, updated_at = NOW()
+       WHERE id = $2 RETURNING *`,
+      [patientStatus, requestId]
+    );
+    return rows[0];
+  },
+
+  async checkAccess(consultationId, doctorId) {
+    const { rows } = await db.query(
+      `SELECT 1 FROM consultations WHERE id = $1 AND doctor_id = $2
+       UNION
+       SELECT 1 FROM consultation_access_requests
+       WHERE consultation_id = $1 AND requesting_doctor_id = $2 AND status = 'approved' AND patient_status = 'approved'`,
+      [consultationId, doctorId]
+    );
+    return rows.length > 0;
+  },
+
+  async findAccessRequestByConsultation(consultationId, requestingDoctorId) {
+    const { rows } = await db.query(
+      `SELECT * FROM consultation_access_requests
+       WHERE consultation_id = $1 AND requesting_doctor_id = $2
+       ORDER BY created_at DESC LIMIT 1`,
+      [consultationId, requestingDoctorId]
+    );
+    return rows[0] || null;
   }
 };
 
@@ -439,7 +661,7 @@ const Invoice = {
         `SELECT i.*, u.first_name, u.last_name FROM invoices i
          JOIN patients p ON i.patient_id = p.id
          JOIN users u ON p.user_id = u.id
-         ORDER BY i.created_at DESC`
+         ORDER BY CASE WHEN i.status = 'unpaid' THEN 0 ELSE 1 END, i.created_at DESC`
       );
       rows = result.rows;
       limit = total;
@@ -449,7 +671,7 @@ const Invoice = {
         `SELECT i.*, u.first_name, u.last_name FROM invoices i
          JOIN patients p ON i.patient_id = p.id
          JOIN users u ON p.user_id = u.id
-         ORDER BY i.created_at DESC LIMIT $1 OFFSET $2`,
+         ORDER BY CASE WHEN i.status = 'unpaid' THEN 0 ELSE 1 END, i.created_at DESC LIMIT $1 OFFSET $2`,
         [limit, offset]
       );
       rows = result.rows;
@@ -475,19 +697,60 @@ const Invoice = {
 
   async updateStatus(id, status) {
     const { rows } = await db.query(
-      'UPDATE invoices SET status = $1, paid_at = CASE WHEN $1 = \'paid\' THEN NOW() ELSE paid_at END WHERE id = $2 RETURNING *',
+      'UPDATE invoices SET status = $1::VARCHAR, paid_at = CASE WHEN $1::VARCHAR = \'paid\' THEN NOW() ELSE paid_at END WHERE id = $2 RETURNING *',
       [status, id]
     );
     return rows[0];
+  },
+
+  async split(id, { amount, description, promisedPaymentDate }) {
+    const client = await db.pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      const { rows: origRows } = await client.query('SELECT * FROM invoices WHERE id = $1', [id]);
+      if (!origRows.length) throw new Error('Invoice not found.');
+      const orig = origRows[0];
+      const newTotal = parseFloat(orig.total) - amount;
+      if (newTotal < 0) throw new Error('Split amount exceeds invoice total.');
+
+      const newInvoiceNumber = `INV-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${Math.floor(Math.random() * 9000) + 1000}`;
+
+      const { rows: newRows } = await client.query(
+        `INSERT INTO invoices (patient_id, doctor_id, assistant_id, invoice_number, amount, tax, total, promised_payment_date)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+        [orig.patient_id, orig.doctor_id, orig.assistant_id, newInvoiceNumber, amount, 0, amount, promisedPaymentDate || null]
+      );
+      const newInvoice = newRows[0];
+
+      await client.query(
+        `INSERT INTO invoice_items (invoice_id, description, quantity, unit_price, total)
+         VALUES ($1, $2, 1, $3, $3)`,
+        [newInvoice.id, description || 'Division note d\'honoraires', amount]
+      );
+
+      await client.query(
+        'UPDATE invoices SET amount = $1, total = $2 WHERE id = $3',
+        [newTotal, newTotal, id]
+      );
+
+      await client.query('COMMIT');
+      return { original: { ...orig, amount: String(newTotal), total: String(newTotal) }, newInvoice };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 };
 
 const Message = {
-  async create({ senderId, receiverId, content }) {
+  async create({ senderId, receiverId, subject, content }) {
     const { rows } = await db.query(
-      `INSERT INTO messages (sender_id, receiver_id, content)
-       VALUES ($1, $2, $3) RETURNING *`,
-      [senderId, receiverId, content]
+      `INSERT INTO messages (sender_id, receiver_id, subject, content)
+       VALUES ($1, $2, $3, $4) RETURNING *`,
+      [senderId, receiverId, subject || null, content]
     );
     return rows[0];
   },
@@ -527,7 +790,7 @@ const Message = {
     const { rows } = await db.query(
       `SELECT DISTINCT ON (other_user.id)
               other_user.id as user_id, other_user.first_name, other_user.last_name, other_user.role,
-              m.content as last_message, m.created_at as last_message_at, m.is_read,
+              m.subject as last_subject, m.content as last_message, m.created_at as last_message_at, m.is_read,
               CASE WHEN m.sender_id = $1 THEN 'sent' ELSE 'received' END as message_type
        FROM messages m
        JOIN users other_user ON other_user.id = CASE WHEN m.sender_id = $1 THEN m.receiver_id ELSE m.sender_id END
@@ -752,7 +1015,140 @@ const Notification = {
       'UPDATE notifications SET is_read = true WHERE user_id = $1 AND is_read = false',
       [userId]
     );
+  },
+
+  async delete(id) {
+    const { rows } = await db.query(
+      'DELETE FROM notifications WHERE id = $1 RETURNING *',
+      [id]
+    );
+    return rows[0];
   }
 };
 
-module.exports = { User, Doctor, Patient, Appointment, Consultation, Document, Invoice, Message, PaymentVerification, AuditLog, Specialization, Notification };
+const DoctorAvailability = {
+  async upsert(doctorId, slots) {
+    const client = await db.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('DELETE FROM doctor_availability WHERE doctor_id = $1', [doctorId]);
+      for (const slot of slots) {
+        await client.query(
+          `INSERT INTO doctor_availability (doctor_id, day_of_week, start_time, end_time, slot_duration)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [doctorId, slot.dayOfWeek, slot.startTime, slot.endTime, slot.slotDuration || 30]
+        );
+      }
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  },
+
+  async findByDoctor(doctorId) {
+    const { rows } = await db.query(
+      'SELECT * FROM doctor_availability WHERE doctor_id = $1 AND is_active = true ORDER BY day_of_week, start_time',
+      [doctorId]
+    );
+    return rows;
+  },
+
+  async getAvailableSlots(doctorId, date) {
+    const dayOfWeek = new Date(date).getDay();
+    const availabilities = await db.query(
+      `SELECT * FROM doctor_availability
+       WHERE doctor_id = $1 AND day_of_week = $2 AND is_active = true`,
+      [doctorId, dayOfWeek]
+    );
+    if (availabilities.rows.length === 0) return [];
+
+    const existingAppointments = await db.query(
+      `SELECT start_time, end_time, status FROM appointments
+       WHERE doctor_id = $1
+         AND DATE(start_time) = $2
+         AND status != 'cancelled'`,
+      [doctorId, date]
+    );
+
+    const slots = [];
+    for (const avail of availabilities.rows) {
+      const startMinutes = timeToMinutes(avail.start_time);
+      const endMinutes = timeToMinutes(avail.end_time);
+      const duration = avail.slot_duration || 30;
+
+      for (let m = startMinutes; m + duration <= endMinutes; m += duration) {
+        const slotStart = `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+        const slotEnd = `${String(Math.floor((m + duration) / 60)).padStart(2, '0')}:${String((m + duration) % 60).padStart(2, '0')}`;
+        const matching = existingAppointments.rows.find(a => {
+          const aStart = `${String(a.start_time.getHours()).padStart(2, '0')}:${String(a.start_time.getMinutes()).padStart(2, '0')}`;
+          const aEnd = `${String(a.end_time.getHours()).padStart(2, '0')}:${String(a.end_time.getMinutes()).padStart(2, '0')}`;
+          return slotStart < aEnd && slotEnd > aStart;
+        });
+        slots.push({
+          start: slotStart,
+          end: slotEnd,
+          status: matching ? matching.status : 'available'
+        });
+      }
+    }
+    return slots;
+  }
+};
+
+const Assurance = {
+  async findAll() {
+    const { rows } = await db.query('SELECT * FROM assurances WHERE is_active = true ORDER BY type, name');
+    return rows;
+  },
+};
+
+const FeeItem = {
+  async create({ doctorId, name, description, price, category }) {
+    const { rows } = await db.query(
+      `INSERT INTO fee_items (doctor_id, name, description, price, category)
+       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [doctorId, name, description, price, category]
+    );
+    return rows[0];
+  },
+
+  async findById(id) {
+    const { rows } = await db.query('SELECT * FROM fee_items WHERE id = $1', [id]);
+    return rows[0];
+  },
+
+  async findByDoctor(doctorId) {
+    const { rows } = await db.query(
+      'SELECT * FROM fee_items WHERE doctor_id = $1 ORDER BY name',
+      [doctorId]
+    );
+    return rows;
+  },
+
+  async update(id, fields) {
+    fields.updated_at = new Date().toISOString();
+    const keys = Object.keys(fields);
+    const values = Object.values(fields);
+    const setClause = keys.map((k, i) => `${k} = $${i + 2}`).join(', ');
+    const { rows } = await db.query(
+      `UPDATE fee_items SET ${setClause} WHERE id = $1 RETURNING *`,
+      [id, ...values]
+    );
+    return rows[0];
+  },
+
+  async delete(id) {
+    const { rows } = await db.query('DELETE FROM fee_items WHERE id = $1 RETURNING *', [id]);
+    return rows[0];
+  }
+};
+
+function timeToMinutes(time) {
+  const [h, m] = String(time).split(':').map(Number);
+  return h * 60 + m;
+}
+
+module.exports = { User, Doctor, Patient, Appointment, Consultation, Document, Invoice, Message, PaymentVerification, AuditLog, Specialization, Notification, DoctorAvailability, FeeItem, Assurance };

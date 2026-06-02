@@ -2,13 +2,17 @@ import { NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useState, useEffect } from 'react';
 import { connectSocket, disconnectSocket } from '../services/socket';
+import api from '../services/api';
 import NotificationBell from './NotificationBell';
+import ChatWidget from './ChatWidget';
 
 const navItems = {
   all: [],
   doctor: [
+    { to: '/dashboard', label: 'Tableau de bord', icon: '📊' },
     { section: 'Gestion' },
-    { to: '/messagerie', label: 'Messagerie interne', icon: '💬' },
+    { to: '/calendar', label: 'Mes rendez-vous', icon: '📅' },
+    { to: '/messagerie?type=externe', label: 'Messagerie', icon: '📧' },
     { to: '/assistants', label: 'Assistants', icon: '👥' },
     {
       label: 'Patients', icon: '👤',
@@ -20,26 +24,43 @@ const navItems = {
     {
       label: 'Finances', icon: '💰',
       children: [
-        { to: '/invoices', label: 'Factures Clients' },
-        { to: '/caisse', label: 'Caisse' },
-        { to: '/subscription', label: 'Mon abonnement' },
+        { to: '/invoices', label: 'Notes d\'honoraires' },
+        { to: '/caisse', label: 'Caisse', icon: '💰' },
+        { to: '/honoraires', label: 'Honoraires', icon: '💰' },
+        { section: 'Mon abonnement' },
       ],
     },
+    { section: 'Mes disponibilités' },
+    { to: '/availability', label: 'Mes disponibilités', icon: '📅' },
     { to: '/profile', label: 'Profil', icon: '⚙️' },
-    { divider: true },
+    { section: 'Notifications' },
+    { to: '/notifications', label: 'Notifications', icon: '🔔' },
   ],
   assistant: [
-    { section: 'Gestion' },
-    { to: '/patients', label: 'Patients', icon: '👥' },
-    { to: '/invoices', label: 'Factures', icon: '💰' },
+    { to: '/dashboard', label: 'Tableau de bord', icon: '📊' },
+    { to: '/calendar', label: 'Calendrier', icon: '📅' },
+    { to: '/patients', label: 'Patients', icon: '👤' },
+    { to: '/invoices', label: 'Notes d\'honoraires', icon: '💰' },
+    { to: '/caisse', label: 'Caisse', icon: '💰' },
+    { to: '/honoraires', label: 'Honoraires', icon: '💰' },
+    { to: '/notifications', label: 'Notifications', icon: '🔔' },
+  ],
+  nurse: [
+    { to: '/dashboard', label: 'Tableau de bord', icon: '📊' },
+    { to: '/calendar', label: 'Calendrier', icon: '📅' },
+    { to: '/patients', label: 'Patients', icon: '👤' },
+    { to: '/invoices', label: 'Notes d\'honoraires', icon: '💰' },
+    { to: '/caisse', label: 'Caisse', icon: '💰' },
+    { to: '/notifications', label: 'Notifications', icon: '🔔' },
   ],
   super_admin: [
+    { to: '/dashboard', label: 'Tableau de bord', icon: '📊' },
     { section: 'Administration' },
     { to: '/admin/users', label: 'Utilisateurs', icon: '👤' },
     { to: '/admin/specializations', label: 'Spécialités', icon: '🏷️' },
     { to: '/admin/payments', label: 'Paiements', icon: '💳' },
     { to: '/patients', label: 'Patients', icon: '👥' },
-    { to: '/invoices', label: 'Factures', icon: '💰' },
+    { to: '/invoices', label: 'Notes d\'honoraires', icon: '💰' },
   ],
   patient: [
     { section: 'Mon espace' },
@@ -47,6 +68,7 @@ const navItems = {
     { to: '/calendar', label: 'Prise de rendez-vous', icon: '📅' },
     { to: '/dossier', label: 'Mon dossier', icon: '📋' },
     { to: '/profile', label: 'Mon profil', icon: '⚙️' },
+    { to: '/notifications', label: 'Notifications', icon: '🔔' }
   ],
 };
 
@@ -85,6 +107,9 @@ function SidebarNavItem({ item, location }) {
   return (
     <NavLink to={item.to} className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
       <span>{item.icon}</span> {item.label}
+      {item.badge !== undefined && item.badge > 0 && (
+        <span className="nav-badge">{item.badge > 99 ? '99+' : item.badge}</span>
+      )}
     </NavLink>
   );
 }
@@ -93,6 +118,7 @@ function Layout() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
+  const [unreadCount, setUnreadCount] = useState(0);
 
   useEffect(() => {
     if (user) {
@@ -102,13 +128,24 @@ function Layout() {
     }
   }, [user]);
 
+  useEffect(() => {
+    if (!user) return;
+    api.get('/notifications/unread-count').then(r => setUnreadCount(r.data.count)).catch(() => {});
+    const interval = setInterval(() => {
+      api.get('/notifications/unread-count').then(r => setUnreadCount(r.data.count)).catch(() => {});
+    }, 30000);
+    return () => clearInterval(interval);
+  }, [user]);
+
   const handleLogout = () => {
     disconnectSocket();
     logout();
     navigate('/login');
   };
 
-  const items = [...(navItems.all || []), ...(navItems[user?.role] || [])];
+  const items = [...(navItems.all || []), ...(navItems[user?.role] || [])].map(item =>
+    item.badge === true ? { ...item, badge: unreadCount } : item
+  );
 
   return (
     <div className="app-layout">
@@ -140,6 +177,7 @@ function Layout() {
         </header>
         <div className="content">
           <Outlet />
+          <ChatWidget />
         </div>
       </main>
     </div>

@@ -131,6 +131,7 @@ CREATE TABLE invoices (
   patient_id UUID NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
   doctor_id UUID REFERENCES doctors(id) ON DELETE SET NULL,
   assistant_id UUID REFERENCES users(id) ON DELETE SET NULL,
+  invoice_number VARCHAR(50),
   amount DECIMAL(10,2) NOT NULL,
   tax DECIMAL(10,2) DEFAULT 0,
   total DECIMAL(10,2) NOT NULL,

@@ -9,5 +9,6 @@ router.post('/', authorize('assistant', 'nurse', 'doctor', 'super_admin'), invoi
 router.get('/:id', invoiceController.getById);
 router.get('/:id/pdf', invoiceController.generatePdf);
 router.put('/:id/status', authorize('assistant', 'nurse', 'doctor', 'super_admin'), invoiceController.updateStatus);
+router.post('/:id/split', authorize('assistant', 'nurse', 'doctor', 'super_admin'), invoiceController.split);
 
 module.exports = router;

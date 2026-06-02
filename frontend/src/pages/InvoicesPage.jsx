@@ -6,14 +6,11 @@ export default function InvoicesPage() {
   const [invoices, setInvoices] = useState([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
-  const [patients, setPatients] = useState([]);
-  const [showModal, setShowModal] = useState(false);
-  const [form, setForm] = useState({ patientId: '', items: [{ description: '', quantity: 1, unitPrice: 0 }] });
   const [limit, setLimit] = useState(20);
-
-  useEffect(() => {
-    api.get('/doctors/patients').then(r => setPatients(r.data)).catch(() => {});
-  }, []);
+  const [splitModal, setSplitModal] = useState(null);
+  const [splitAmount, setSplitAmount] = useState('');
+  const [splitDesc, setSplitDesc] = useState('');
+  const [splitDate, setSplitDate] = useState('');
 
   useEffect(() => {
     fetchInvoices();
@@ -27,40 +24,45 @@ export default function InvoicesPage() {
     } catch {}
   }
 
-  function addItem() {
-    setForm({ ...form, items: [...form.items, { description: '', quantity: 1, unitPrice: 0 }] });
-  }
-
-  function updateItem(i, field, value) {
-    const items = [...form.items];
-    items[i] = { ...items[i], [field]: value };
-    if (field === 'quantity' || field === 'unitPrice') {
-      items[i].total = items[i].quantity * items[i].unitPrice;
-    }
-    setForm({ ...form, items });
-  }
-
-  async function handleCreate(e) {
-    e.preventDefault();
+  async function handleMarkPaid(inv) {
     try {
-      const items = form.items.map(item => ({
-        ...item,
-        total: item.quantity * item.unitPrice,
-      }));
-      await api.post('/invoices', { patientId: form.patientId, items });
-      setShowModal(false);
-      setForm({ patientId: '', items: [{ description: '', quantity: 1, unitPrice: 0 }] });
+      await api.put(`/invoices/${inv.id}/status`, { status: 'paid' });
       fetchInvoices();
     } catch (err) {
       alert(err.response?.data?.error || 'Erreur');
     }
   }
 
+  async function handleSplit(inv) {
+    const amount = parseFloat(splitAmount);
+    if (!amount || amount <= 0 || amount >= parseFloat(inv.total)) {
+      alert('Le montant doit être supérieur à 0 et inférieur au total de la note d\'honoraires.');
+      return;
+    }
+    try {
+      await api.post(`/invoices/${inv.id}/split`, { amount, description: splitDesc || 'Division note d\'honoraires', promisedPaymentDate: splitDate || null });
+      setSplitModal(null);
+      setSplitAmount('');
+      setSplitDesc('');
+      setSplitDate('');
+      fetchInvoices();
+    } catch (err) {
+      alert(err.response?.data?.error || 'Erreur');
+    }
+  }
+
+  function formatDate(dateStr) {
+    if (!dateStr || dateStr === 'null') return '-';
+    const d = dateStr.includes('T') ? dateStr.split('T')[0] : dateStr;
+    return new Date(d + 'T00:00:00').toLocaleDateString('fr-TN');
+  }
+
+  const showActions = invoices.some(inv => inv.status !== 'paid');
+  const colCount = showActions ? 7 : 6;
   return (
     <div>
       <div className="flex-between mb-4">
-        <h2>💰 Factures</h2>
-        <button className="btn btn-primary" onClick={() => setShowModal(true)}>+ Nouvelle facture</button>
+        <h2>💰 Notes d'honoraires</h2>
       </div>
 
       <div className="card">
@@ -68,33 +70,58 @@ export default function InvoicesPage() {
           <table>
             <thead>
               <tr>
-                <th>N° Facture</th>
+                <th>N° Note</th>
                 <th>Patient</th>
-                <th>Montant</th>
                 <th>Total</th>
                 <th>Statut</th>
                 <th>Date</th>
-                <th>PDF</th>
+                <th>Date remb.</th>
+                {showActions && <th>Actions</th>}
               </tr>
             </thead>
             <tbody>
               {invoices.length === 0 && (
-                <tr><td colSpan={7} className="text-center text-muted">Aucune facture</td></tr>
+                <tr><td colSpan={colCount} className="text-center text-muted">Aucune note d'honoraires</td></tr>
               )}
               {invoices.map(inv => (
                 <tr key={inv.id}>
                   <td>{inv.invoice_number}</td>
                   <td>{inv.first_name} {inv.last_name}</td>
-                  <td>{inv.amount} TND</td>
                   <td><strong>{inv.total} TND</strong></td>
-                  <td><span className={`badge badge-${inv.status === 'paid' ? 'success' : inv.status === 'cancelled' ? 'danger' : 'warning'}`}>{inv.status}</span></td>
-                  <td>{new Date(inv.created_at).toLocaleDateString('fr-TN')}</td>
                   <td>
-                    <button className="btn btn-sm btn-outline" onClick={async () => {
-                      const res = await api.get(`/invoices/${inv.id}/pdf`);
-                      window.open(`http://localhost:5000/${res.data.pdfPath}`, '_blank');
-                    }}>📄</button>
+                    <span style={{
+                      display: 'inline-block',
+                      padding: '4px 10px',
+                      borderRadius: 20,
+                      fontSize: 12,
+                      fontWeight: 500,
+                      background: inv.status === 'paid' ? '#d1fae5' : inv.status === 'cancelled' ? '#fee2e2' : '#fef3c7',
+                      color: inv.status === 'paid' ? '#065f46' : inv.status === 'cancelled' ? '#991b1b' : '#92400e',
+                    }}>
+                      {inv.status === 'paid' ? 'Payée' : inv.status === 'cancelled' ? 'Annulée' : 'Impayée'}
+                    </span>
                   </td>
+                  <td>{new Date(inv.created_at).toLocaleDateString('fr-TN')}</td>
+                  <td>{formatDate(inv.status === 'paid' ? inv.paid_at : inv.promised_payment_date)}</td>
+                  {showActions && (
+                    <td>
+                      {inv.status !== 'paid' && (
+                        <div style={{ display: 'flex', gap: 6 }}>
+                          <button className="btn btn-sm btn-success" onClick={() => handleMarkPaid(inv)}>
+                            ✓ Confirmer
+                          </button>
+                          <button className="btn btn-sm btn-outline" onClick={() => {
+                            setSplitModal(inv);
+                            setSplitAmount('');
+                            setSplitDesc('');
+                            setSplitDate('');
+                          }}>
+                            Split
+                          </button>
+                        </div>
+                      )}
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>
@@ -103,39 +130,29 @@ export default function InvoicesPage() {
         <Pagination total={total} page={page} limit={limit} onPageChange={setPage} onLimitChange={setLimit} />
       </div>
 
-      {showModal && (
-        <div className="modal-overlay" onClick={() => setShowModal(false)}>
-          <div className="modal" onClick={e => e.stopPropagation()}>
-            <h2>Nouvelle facture</h2>
-            <form onSubmit={handleCreate}>
-              <div className="form-group">
-                <label>Patient</label>
-                <select className="form-select" value={form.patientId} onChange={e => setForm({...form, patientId: e.target.value})} required>
-                  <option value="">Sélectionner...</option>
-                  {patients.map(p => (
-                    <option key={p.id} value={p.id}>{p.first_name} {p.last_name}</option>
-                  ))}
-                </select>
-              </div>
-
-              {form.items.map((item, i) => (
-                <div key={i} className="grid grid-4" style={{ gap: 8, marginBottom: 8 }}>
-                  <input className="form-input" placeholder="Description" value={item.description} onChange={e => updateItem(i, 'description', e.target.value)} required />
-                  <input type="number" className="form-input" placeholder="Qté" value={item.quantity} onChange={e => updateItem(i, 'quantity', parseFloat(e.target.value) || 0)} min={1} />
-                  <input type="number" step="0.01" className="form-input" placeholder="P.U." value={item.unitPrice} onChange={e => updateItem(i, 'unitPrice', parseFloat(e.target.value) || 0)} min={0} />
-                  <div style={{ display: 'flex', alignItems: 'center', padding: '0 8px' }}>
-                    <strong>{item.quantity * item.unitPrice} TND</strong>
-                  </div>
-                </div>
-              ))}
-
-              <button type="button" className="btn btn-sm btn-outline mt-2" onClick={addItem}>+ Ajouter une ligne</button>
-
-              <div className="modal-actions">
-                <button type="button" className="btn btn-outline" onClick={() => setShowModal(false)}>Annuler</button>
-                <button type="submit" className="btn btn-primary">Créer la facture</button>
-              </div>
-            </form>
+      {splitModal && (
+        <div className="modal-overlay" onClick={() => setSplitModal(null)}>
+          <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 420 }}>
+            <h3>Diviser la note d'honoraires</h3>
+            <p style={{ fontSize: 13, color: '#64748b', marginBottom: 16 }}>
+              Note: <strong>{splitModal.invoice_number}</strong> — Total: <strong>{splitModal.total} TND</strong>
+            </p>
+            <div className="form-group">
+              <label>Montant à soustraire</label>
+              <input type="number" step="0.01" className="form-input" value={splitAmount} onChange={e => setSplitAmount(e.target.value)} placeholder="Montant" min="0.01" />
+            </div>
+            <div className="form-group">
+              <label>Date de remboursement annoncée</label>
+              <input type="date" className="form-input" value={splitDate} onChange={e => setSplitDate(e.target.value)} />
+            </div>
+            <div className="form-group">
+              <label>Motif (optionnel)</label>
+              <input className="form-input" value={splitDesc} onChange={e => setSplitDesc(e.target.value)} placeholder="Ex: Consultation séparée" />
+            </div>
+            <div className="modal-actions">
+              <button className="btn btn-outline" onClick={() => setSplitModal(null)}>Annuler</button>
+              <button className="btn btn-primary" onClick={() => handleSplit(splitModal)}>Diviser</button>
+            </div>
           </div>
         </div>
       )}

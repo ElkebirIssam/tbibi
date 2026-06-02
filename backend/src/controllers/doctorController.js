@@ -14,8 +14,16 @@ const doctorController = {
 
   async getPatients(req, res) {
     try {
-      const doctor = await Doctor.findByUserId(req.user.id);
-      const patients = await Doctor.getPatients(doctor.id);
+      let doctorId;
+      if (['assistant', 'nurse'].includes(req.user.role)) {
+        const user = await User.findById(req.user.id);
+        doctorId = user.doctor_id;
+        if (!doctorId) return res.status(400).json({ error: 'No doctor linked to your account.' });
+      } else {
+        const doctor = await Doctor.findByUserId(req.user.id);
+        doctorId = doctor.id;
+      }
+      const patients = await Doctor.getPatients(doctorId);
       res.json(patients);
     } catch (error) {
       console.error('Get patients error:', error);
@@ -61,6 +69,8 @@ const doctorController = {
       if (existingUser) return res.status(400).json({ error: 'Email already exists.' });
 
       const assistantRole = role === 'nurse' ? 'nurse' : 'assistant';
+      const doctor = await Doctor.findByUserId(req.user.id);
+
       const user = await User.create({
         email,
         passwordHash,
@@ -71,8 +81,12 @@ const doctorController = {
         isActive: true,
       });
 
-      // Auto-verified since the doctor vouches for them
-      await User.update(user.id, { is_verified: true });
+      // Link assistant to the doctor who created them
+      if (doctor) {
+        await User.update(user.id, { is_verified: true, doctor_id: doctor.id });
+      } else {
+        await User.update(user.id, { is_verified: true });
+      }
 
       await AuditLog.create({
         userId: req.user.id,
@@ -127,9 +141,17 @@ const doctorController = {
   async assignPatient(req, res) {
     try {
       const { patientId } = req.body;
-      const doctor = await Doctor.findByUserId(req.user.id);
-      await Patient.assignToDoctor(patientId, doctor.id);
-      res.json({ message: 'Patient assigned.' });
+      let doctorId;
+      if (['assistant', 'nurse'].includes(req.user.role)) {
+        const user = await User.findById(req.user.id);
+        doctorId = user.doctor_id;
+        if (!doctorId) return res.status(400).json({ error: 'No doctor linked to your account.' });
+      } else {
+        const doctor = await Doctor.findByUserId(req.user.id);
+        doctorId = doctor.id;
+      }
+      const result = await Patient.assignToDoctor(patientId, doctorId);
+      res.json({ message: 'Patient assigned.', linked: !!result });
     } catch (error) {
       console.error('Assign patient error:', error);
       res.status(500).json({ error: 'Server error.' });

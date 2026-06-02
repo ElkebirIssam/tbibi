@@ -59,7 +59,7 @@ const adminController = {
       console.error('Delete user error:', error);
       if (error.code === '23503') {
         return res.status(409).json({
-          error: 'Impossible de supprimer cet utilisateur car il est lié à d\'autres enregistrements (rendez-vous, factures, messages). Supprimez d\'abord ses associations.',
+          error: 'Impossible de supprimer cet utilisateur car il est lié à d\'autres enregistrements (rendez-vous, notes d\'honoraires, messages). Supprimez d\'abord ses associations.',
         });
       }
       res.status(500).json({ error: 'Erreur serveur lors de la suppression.' });

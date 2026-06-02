@@ -23,6 +23,7 @@ export function AuthProvider({ children }) {
       setUser(res.data);
     } catch {
       localStorage.removeItem('tbibi_token');
+      delete api.defaults.headers.common['Authorization'];
     } finally {
       setLoading(false);
     }
@@ -43,7 +44,7 @@ export function AuthProvider({ children }) {
   }
 
   return (
-    <AuthContext.Provider value={{ user, login, logout, loading }}>
+    <AuthContext.Provider value={{ user, login, logout, loading, fetchProfile }}>
       {children}
     </AuthContext.Provider>
   );

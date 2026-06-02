@@ -65,23 +65,28 @@ export default function AssistantsPage() {
               {assistants.length === 0 && (
                 <tr><td colSpan={6} className="text-center text-muted">Aucun assistant</td></tr>
               )}
-              {assistants.map(a => (
-                <tr key={a.id}>
-                  <td>{a.first_name} {a.last_name}</td>
-                  <td>{a.email}</td>
-                  <td><span className="badge badge-info">{a.role === 'nurse' ? 'Infirmier' : 'Assistant'}</span></td>
-                  <td>
-                    <span className={`badge ${a.is_verified ? 'badge-success' : 'badge-warning'}`}>
-                      {a.is_verified ? '✅' : '⏳'}
-                    </span>
-                  </td>
-                  <td>
-                    <button className="btn btn-sm btn-danger" onClick={() => handleRemove(a.id)}>
-                      Supprimer
-                    </button>
-                  </td>
-                </tr>
-              ))}
+                  {assistants.map(a => (
+                    <tr key={a.id}>
+                      <td>{a.first_name} {a.last_name}</td>
+                      <td>{a.email}</td>
+                      <td><span className="badge badge-info">{a.role === 'nurse' ? 'Infirmier' : 'Assistant'}</span></td>
+                      <td>
+                        <span className={`badge ${a.is_verified ? 'badge-success' : 'badge-warning'}`}>
+                          {a.is_verified ? '✅' : '⏳'}
+                        </span>
+                      </td>
+                      <td>
+                        <span className={`badge ${a.is_active ? 'badge-success' : 'badge-danger'}`}>
+                          {a.is_active ? 'Actif' : 'Inactif'}
+                        </span>
+                      </td>
+                      <td>
+                        <button className="btn btn-sm btn-danger" onClick={() => handleRemove(a.id)}>
+                          Supprimer
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
             </tbody>
           </table>
         </div>

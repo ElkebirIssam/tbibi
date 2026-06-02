@@ -2,8 +2,8 @@ const router = require('express').Router();
 const specializationController = require('../controllers/specializationController');
 const { authenticate, authorize } = require('../middleware/auth');
 
-// List is public for authenticated users
-router.get('/', authenticate, specializationController.list);
+// Public list (no auth required, e.g. for registration page)
+router.get('/', specializationController.list);
 router.get('/:id', authenticate, specializationController.getById);
 
 // Admin-only CRUD
